@@ -1,0 +1,14 @@
+{
+  "name": "clickai-admin-server",
+  "version": "1.0.0",
+  "description": "ClickAI Multi-Agent Gateway Admin Server",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "sql.js": "^1.10.0",
+    "ws": "^8.16.0"
+  }
+}
