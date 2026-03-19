@@ -428,3 +428,19 @@ function toast(msg, type = 'info') {
   document.body.appendChild(el);
   setTimeout(() => el.remove(), 3000);
 }
+
+// ═══ OpenClaw UI ═══
+async function openOpenClawUI() {
+  try {
+    const health = await apiFetch('/health');
+    const token = health.gatewayToken || '';
+    const host = window.location.hostname;
+    const port = health.gatewayPort || 18789;
+    const url = `http://${host}:${port}/#token=${token}`;
+    window.open(url, '_blank');
+  } catch {
+    // Fallback
+    const host = window.location.hostname;
+    window.open(`http://${host}:18789/`, '_blank');
+  }
+}
