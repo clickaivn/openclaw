@@ -122,7 +122,13 @@ async function handleRequest(req, res) {
 
   // Health check
   if (pathname === '/api/health') {
-    return sendJSON(res, { ok: true, gateway: wsClient.isConnected(), timestamp: Date.now() });
+    return sendJSON(res, {
+      ok: true,
+      gateway: wsClient.isConnected(),
+      gatewayToken: process.env.OPENCLAW_GATEWAY_TOKEN || '5c6786904c93dc886c9b78525fb655c57e9084b41c42e833',
+      gatewayPort: parseInt(process.env.OPENCLAW_GATEWAY_PORT) || 18789,
+      timestamp: Date.now()
+    });
   }
 
   // ── Auth ──
