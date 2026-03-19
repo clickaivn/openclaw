@@ -45,6 +45,28 @@ services:
       retries: 5
       start_period: 20s
 
+  # ═══ Admin page — Main entry point (Landing page) ═══
+  admin-server:
+    container_name: clickai-admin-v2
+    build:
+      context: ./Admin page ClickBot
+      dockerfile: Dockerfile
+    environment:
+      ADMIN_PORT: 3456
+      OPENCLAW_WS_URL: ws://openclaw-gateway:18789
+      OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN:-}
+      OPENCLAW_DATA_DIR: /data/openclaw
+    volumes:
+      - ${OPENCLAW_CONFIG_DIR}:/data/openclaw
+      - admin-data:/app/data
+    ports:
+      - "${ADMIN_PORT:-3456}:3456"
+    init: true
+    restart: unless-stopped
+    depends_on:
+      openclaw-gateway:
+        condition: service_healthy
+
   openclaw-cli:
     container_name: openclaw-cli-v1
     image: ${OPENCLAW_IMAGE:-openclaw:local}
@@ -75,3 +97,6 @@ services:
     entrypoint: ["node", "dist/index.js"]
     depends_on:
       - openclaw-gateway
+
+volumes:
+  admin-data:
