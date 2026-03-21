@@ -105,6 +105,55 @@ function httpsRequest(url, options, body) {
   });
 }
 
+// ═══ OpenClaw Iframe Proxy — strips X-Frame-Options for embedding ═══
+const OPENCLAW_GW_PORT = parseInt(process.env.OPENCLAW_PORT) || 18789;
+
+function proxyOpenClawFrame(req, res) {
+  // Proxy path: strip /api/openclaw-frame prefix, keep the rest
+  let targetPath = req.url.replace(/^\/api\/openclaw-frame/, '') || '/';
+
+  const proxyOpts = {
+    hostname: '127.0.0.1',
+    port: OPENCLAW_GW_PORT,
+    path: targetPath,
+    method: req.method,
+    headers: { ...req.headers, host: `127.0.0.1:${OPENCLAW_GW_PORT}` },
+  };
+
+  const proxyReq = http.request(proxyOpts, (proxyRes) => {
+    // Strip iframe-blocking headers
+    const headers = { ...proxyRes.headers };
+    delete headers['x-frame-options'];
+    delete headers['content-security-policy'];
+
+    // For HTML responses, inject <base href> so relative URLs resolve to gateway
+    const isHtml = (headers['content-type'] || '').includes('text/html');
+    if (isHtml) {
+      let body = '';
+      proxyRes.setEncoding('utf8');
+      proxyRes.on('data', chunk => body += chunk);
+      proxyRes.on('end', () => {
+        // Inject <base href> pointing to gateway so ./assets/* loads from gateway directly
+        const baseTag = `<base href="http://127.0.0.1:${OPENCLAW_GW_PORT}/">`;
+        body = body.replace('<head>', '<head>\n    ' + baseTag);
+        delete headers['content-length']; // length changed
+        res.writeHead(proxyRes.statusCode, headers);
+        res.end(body);
+      });
+    } else {
+      res.writeHead(proxyRes.statusCode, headers);
+      proxyRes.pipe(res);
+    }
+  });
+
+  proxyReq.on('error', (e) => {
+    res.writeHead(502, { 'Content-Type': 'text/plain' });
+    res.end('OpenClaw gateway unreachable');
+  });
+  proxyReq.setTimeout(15000, () => { proxyReq.destroy(); });
+  req.pipe(proxyReq);
+}
+
 // ═══ Route handler ═══
 async function handleRequest(req, res) {
   // CORS
@@ -113,6 +162,11 @@ async function handleRequest(req, res) {
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 
   if (req.method === 'OPTIONS') { res.writeHead(200); res.end(); return; }
+
+  // OpenClaw iframe proxy — strips X-Frame-Options for embedding
+  if (req.url.startsWith('/api/openclaw-frame')) {
+    return proxyOpenClawFrame(req, res);
+  }
 
   const url = new URL(req.url, `http://localhost:${PORT}`);
   const pathname = url.pathname;
@@ -196,39 +250,142 @@ async function handleRequest(req, res) {
       const providers = body.providers || body;
       if (!Array.isArray(providers)) return sendError(res, 'providers must be an array');
 
-      // 1. Save to SQLite
-      llmQueries.replaceAll(agentId, providers);
-
-      // 2. Write auth-profiles.json for this agent
-      const existingProfiles = bridge.readAuthProfiles(agentId);
-      const authProfiles = bridge.providersToAuthProfiles(providers, existingProfiles);
-      const written = bridge.writeAuthProfiles(agentId, authProfiles);
-
-      // 3. Reload secrets on OpenClaw gateway
+      let written = false;
       let reloaded = false;
-      if (written) {
-        try { reloaded = await wsClient.secretsReload(); } catch {}
+
+      // Auto-provision: workspace + SOUL.md + openclaw.json entry
+      bridge.ensureAgentProvisioned(agentId, body.primaryModel || '');
+
+      // Only update providers if non-empty (allows model-only updates)
+      if (providers.length > 0) {
+        // 1. Save to SQLite
+        llmQueries.replaceAll(agentId, providers);
+
+        // 2. Write auth-profiles.json for this agent
+        const existingProfiles = bridge.readAuthProfiles(agentId);
+        const authProfiles = bridge.providersToAuthProfiles(providers, existingProfiles);
+        written = bridge.writeAuthProfiles(agentId, authProfiles);
+
+        // 3. Mark written — reload happens after all changes below
+        // (secrets.reload + config.reload done at step 5)
       }
 
-      // 4. Update primary model if specified
+      // 4. Update primary model if specified (both openclaw.json + DB)
       if (body.primaryModel) {
         bridge.updateAgentModel(agentId, body.primaryModel);
+        // Also update in DB so dashboard reflects the active model
+        const existing = agentQueries.getById(agentId);
+        if (existing) {
+          agentQueries.create({ ...existing, primary_model: body.primaryModel });
+        }
+      }
+
+      // 5. Push model change to gateway in-memory config via config.patch
+      if (body.primaryModel) {
+        let normalizedModel = body.primaryModel;
+        if (normalizedModel.startsWith('google/')) normalizedModel = 'gemini/' + normalizedModel.slice(7);
+        try { await wsClient.configPatchModel(agentId, normalizedModel); } catch {}
+      }
+      // 6. Reload secrets (API keys) on gateway
+      if (written) {
+        try { reloaded = await wsClient.secretsReload(); } catch {}
       }
 
       return sendJSON(res, {
         ok: true,
         written,
         reloaded,
+        configReloaded: true,
         providersCount: providers.length,
       });
     }
+  }
+
+  // ── Agent Sessions (from filesystem) ──
+  const sessMatch = pathname.match(/^\/api\/agents\/([^/]+)\/sessions$/);
+  if (sessMatch && method === 'GET') {
+    const agentId = decodeURIComponent(sessMatch[1]);
+    const sessions = bridge.readAgentSessions(agentId);
+    return sendJSON(res, sessions);
+  }
+
+  // ── Session Chat History (read JSONL files) ──
+  const histMatch = pathname.match(/^\/api\/agents\/([^/]+)\/sessions\/(.+)\/history$/);
+  if (histMatch && method === 'GET') {
+    const agentId = decodeURIComponent(histMatch[1]);
+    const sessionKey = decodeURIComponent(histMatch[2]);
+    const messages = bridge.readSessionHistory(agentId, sessionKey);
+    return sendJSON(res, { messages });
+  }
+
+  // ── Skill Requests (from Extension) ──
+  if (pathname === '/api/skill-requests' && method === 'POST') {
+    const body = await readBody(req);
+    const requestsFile = path.join(__dirname, 'data', 'skill-requests.json');
+    let requests = [];
+    try { requests = JSON.parse(fs.readFileSync(requestsFile, 'utf8')); } catch {}
+    requests.push({ ...body, id: Date.now().toString(36), receivedAt: new Date().toISOString() });
+    fs.mkdirSync(path.dirname(requestsFile), { recursive: true });
+    fs.writeFileSync(requestsFile, JSON.stringify(requests, null, 2));
+    console.log('[Admin] Skill request received:', body.skillName, 'from', body.userId);
+    return sendJSON(res, { ok: true, message: 'Request saved' });
+  }
+  if (pathname === '/api/skill-requests' && method === 'GET') {
+    const requestsFile = path.join(__dirname, 'data', 'skill-requests.json');
+    let requests = [];
+    try { requests = JSON.parse(fs.readFileSync(requestsFile, 'utf8')); } catch {}
+    return sendJSON(res, requests);
+  }
+
+  // Update skill request status
+  const reqStatusMatch = pathname.match(/^\/api\/skill-requests\/([^/]+)\/status$/);
+  if (reqStatusMatch && method === 'PATCH') {
+    const reqId = decodeURIComponent(reqStatusMatch[1]);
+    const body = await readBody(req);
+    const requestsFile = path.join(__dirname, 'data', 'skill-requests.json');
+    let requests = [];
+    try { requests = JSON.parse(fs.readFileSync(requestsFile, 'utf8')); } catch {}
+    const found = requests.find(r => r.id === reqId);
+    if (found) {
+      found.status = body.status || 'new';
+      found.updatedAt = new Date().toISOString();
+      fs.writeFileSync(requestsFile, JSON.stringify(requests, null, 2));
+      console.log('[Admin] Request status updated:', reqId, '->', body.status);
+      return sendJSON(res, { ok: true });
+    }
+    res.writeHead(404); res.end(JSON.stringify({ error: 'Request not found' }));
+    return;
+  }
+
+  // ── Per-Agent Credentials (from Extension) ──
+  const credMatch = pathname.match(/^\/api\/agents\/([^/]+)\/credentials$/);
+  if (credMatch && method === 'POST') {
+    const agentId = decodeURIComponent(credMatch[1]);
+    const body = await readBody(req);
+    const credFile = path.join(__dirname, 'data', 'credentials', agentId + '.json');
+    fs.mkdirSync(path.dirname(credFile), { recursive: true });
+    fs.writeFileSync(credFile, JSON.stringify(body.credentials || {}, null, 2));
+    console.log('[Admin] Credentials saved for agent:', agentId);
+    return sendJSON(res, { ok: true });
+  }
+  if (credMatch && method === 'GET') {
+    const agentId = decodeURIComponent(credMatch[1]);
+    const credFile = path.join(__dirname, 'data', 'credentials', agentId + '.json');
+    let creds = {};
+    try { creds = JSON.parse(fs.readFileSync(credFile, 'utf8')); } catch {}
+    return sendJSON(res, creds);
   }
 
   // ── Agent Permissions ──
   const permMatch = pathname.match(/^\/api\/agents\/([^/]+)\/permissions$/);
   if (permMatch) {
     const agentId = decodeURIComponent(permMatch[1]);
-    if (method === 'GET') return sendJSON(res, permQueries.getByAgent(agentId) || {});
+    if (method === 'GET') {
+      const saved = permQueries.getByAgent(agentId);
+      // Return defaults (all ON) when no saved permissions exist
+      const defaults = { browser_control: 1, microphone: 1, notifications: 1, clipboard: 1, file_access: 1, tab_management: 1 };
+      return sendJSON(res, saved || defaults);
+    }
     if (method === 'PUT') {
       const body = await readBody(req);
       permQueries.upsert(agentId, body);
@@ -236,11 +393,35 @@ async function handleRequest(req, res) {
     }
   }
 
-  // ── Agent Skills ──
+  // ── Agent Skills (merged: defaults + session-resolved + user-installed + DB) ──
   const skillMatch = pathname.match(/^\/api\/agents\/([^/]+)\/skills$/);
   if (skillMatch) {
     const agentId = decodeURIComponent(skillMatch[1]);
-    if (method === 'GET') return sendJSON(res, skillQueries.getByAgent(agentId));
+    if (method === 'GET') {
+      // 1. Get default bundled skills
+      const defaults = bridge.listDefaultSkills();
+      // 2. Get resolved skills from sessions (most accurate active state)
+      const sessionSkills = bridge.readAgentSkillsFromSessions(agentId);
+      // 3. Get per-user installed skills
+      const userSkills = bridge.readUserInstalledSkills(agentId);
+      // 4. Get DB skills
+      const dbSkills = skillQueries.getByAgent(agentId).map(s => ({
+        name: s.skill_name, description: '', source: 'db', enabled: !!s.enabled,
+      }));
+
+      // Merge: session skills take priority (most accurate), then user, then defaults, then DB
+      const seen = new Set();
+      const merged = [];
+      for (const list of [sessionSkills, userSkills, defaults, dbSkills]) {
+        for (const s of list) {
+          if (!seen.has(s.name)) {
+            seen.add(s.name);
+            merged.push(s);
+          }
+        }
+      }
+      return sendJSON(res, merged);
+    }
     if (method === 'PUT') {
       const body = await readBody(req);
       if (Array.isArray(body)) {
@@ -314,18 +495,100 @@ async function handleRequest(req, res) {
 
   // ── OpenClaw Gateway Status ──
   if (pathname === '/api/openclaw/status' && method === 'GET') {
-    let models = [], sessions = [];
+    let models = [];
     try {
       models = await wsClient.modelsList();
-      sessions = await wsClient.sessionsList();
     } catch {}
+
+    // Read sessions from filesystem (all agents)
+    const fsAgents = bridge.listAgentsFromFilesystem();
+    let allSessions = [];
+    for (const agent of fsAgents) {
+      const sessions = bridge.readAgentSessions(agent.id);
+      allSessions = allSessions.concat(sessions.map(s => ({ ...s, agentId: agent.id })));
+    }
+    allSessions.sort((a, b) => b.updatedAt - a.updatedAt);
+
     return sendJSON(res, {
       connected: wsClient.isConnected(),
       modelsCount: models.length,
       models,
-      sessionsCount: sessions.length,
-      sessions,
+      sessionsCount: allSessions.length,
+      sessions: allSessions,
     });
+  }
+
+  // ── Chat Proxy — route chat to correct subagent ──
+  // POST /api/chat { agentId, message, sessionKey? }
+  // OpenClaw or any external caller uses this to chat with a specific user's subagent
+  if (pathname === '/api/chat' && method === 'POST') {
+    const body = await readBody(req);
+    const { agentId, message, sessionKey } = body;
+
+    if (!message) return sendError(res, 'message is required');
+
+    // Resolve agentId: explicit > from email > fallback
+    let resolvedAgentId = agentId || '';
+    if (!resolvedAgentId && body.email) {
+      // Convert email to agent ID
+      const parts = body.email.toLowerCase().split('@');
+      const local = parts[0] || 'unknown';
+      const domain = (parts[1] || '').split('.').slice(0, -1).join('-') || 'local';
+      resolvedAgentId = 'user-' + (local + '-' + domain).replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+    }
+
+    if (!resolvedAgentId) return sendError(res, 'agentId or email is required');
+
+    // Verify agent exists
+    const agent = agentQueries.getById(resolvedAgentId);
+    if (!agent) return sendError(res, 'Agent not found: ' + resolvedAgentId, 404);
+
+    // Check agent has LLM providers configured
+    const providers = llmQueries.getByAgent(resolvedAgentId);
+    const hasKey = providers.some(p => p.api_key && p.api_key.length > 3);
+    if (!hasKey) {
+      return sendError(res, 'No API key configured for agent: ' + resolvedAgentId + '. Configure LLM providers first.', 400);
+    }
+
+    // Forward to gateway
+    try {
+      const result = await wsClient.chatSend(resolvedAgentId, message, sessionKey || 'main');
+      return sendJSON(res, {
+        ok: true,
+        agentId: resolvedAgentId,
+        sessionKey: `agent:${resolvedAgentId}:${sessionKey || 'main'}`,
+        model: agent.primary_model || '',
+        result,
+      });
+    } catch (e) {
+      return sendError(res, 'Chat send failed: ' + e.message, 502);
+    }
+  }
+
+  // ── Agent Config — read per-agent config from OpenClaw ──
+  const configMatch = pathname.match(/^\/api\/agents\/([^/]+)\/config$/);
+  if (configMatch && method === 'GET') {
+    const agentId = decodeURIComponent(configMatch[1]);
+    try {
+      const config = bridge.readOpenClawConfig();
+      if (!config) return sendError(res, 'Could not read openclaw.json', 500);
+
+      const agentEntry = (config?.agents?.list || []).find(a => a.id === agentId);
+      const defaults = config?.agents?.defaults || {};
+      const authProfiles = bridge.readAuthProfiles(agentId);
+
+      return sendJSON(res, {
+        agentId,
+        model: agentEntry?.model || defaults?.model?.primary || '',
+        tools: agentEntry?.tools || {},
+        workspace: agentEntry?.workspace || defaults?.workspace || '',
+        hasAuthProfiles: !!authProfiles?.profiles && Object.keys(authProfiles.profiles).length > 0,
+        providers: Object.keys(authProfiles?.profiles || {}),
+        found: !!agentEntry,
+      });
+    } catch (e) {
+      return sendError(res, 'Config read failed: ' + e.message, 500);
+    }
   }
 
   // ════════════════ Meeting API ════════════════
@@ -370,8 +633,8 @@ async function handleRequest(req, res) {
     return sendJSON(res, files);
   }
 
-  // AI Summarize via ClickAI API → Gemini 2.5 Flash
-  if (pathname === '/api/meeting/summarize' && method === 'POST') {
+  // AI Transcript only (audio → text)
+  if (pathname === '/api/meeting/transcript' && method === 'POST') {
     const body = await readBody(req);
     const { filePath: audioPath, config, accessToken } = body;
 
@@ -379,8 +642,9 @@ async function handleRequest(req, res) {
     if (!audioPath) return sendError(res, 'filePath required');
 
     try {
-      // Read audio file from disk
-      const fullAudioPath = path.join(__dirname, audioPath.startsWith('/') ? audioPath.slice(1) : audioPath);
+      // audioPath is like "/meeting/{userId}/{file}" — resolve to data/meeting/{userId}/{file}
+      const relativePath = audioPath.replace(/^\/meeting\//, '');
+      const fullAudioPath = path.join(MEETING_DIR, relativePath);
       if (!fs.existsSync(fullAudioPath)) return sendError(res, 'Audio file not found', 404);
 
       const audioBuffer = fs.readFileSync(fullAudioPath);
@@ -390,15 +654,74 @@ async function handleRequest(req, res) {
       const mimeType = mimeMap[ext] || 'audio/webm';
 
       const lang = config?.language || 'vi';
+      const langName = { vi: 'Vietnamese', en: 'English', auto: 'Auto-detect' }[lang] || lang;
+
+      const payload = JSON.stringify({
+        model: 'gemini-2.5-flash',
+        messages: [
+          { role: 'system', content: `You are a professional transcriber. Listen to the audio carefully and produce a complete, accurate transcript. Output ONLY the transcript text, no JSON, no markdown. Language: ${langName}. Include speaker changes as "Speaker 1:", "Speaker 2:" etc. if distinguishable.` },
+          {
+            role: 'user',
+            content: [
+              { type: 'audio_url', audio_url: { url: `data:${mimeType};base64,${audioBase64}` } },
+              { type: 'text', text: `Transcribe this audio completely in ${langName}. Output only the transcript text.` }
+            ]
+          }
+        ],
+        temperature: 0.1,
+        max_tokens: 8192
+      });
+
+      console.log(`   🎤 Transcribing audio (${(audioBuffer.length / 1024 / 1024).toFixed(1)}MB) via ClickAI...`);
+
+      const resp = await httpsRequest('https://clickai.io/conversation/api/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(payload),
+          'Authorization': `Bearer ${accessToken}`
+        }
+      }, payload);
+
+      if (resp.status !== 200) {
+        console.error('   ❌ ClickAI transcript error:', resp.status);
+        return sendError(res, `AI API error (${resp.status})`, resp.status);
+      }
+
+      let transcript = '';
+      if (resp.data?.choices?.[0]?.message?.content) {
+        transcript = resp.data.choices[0].message.content;
+      } else if (resp.data?.content) {
+        transcript = typeof resp.data.content === 'string' ? resp.data.content : JSON.stringify(resp.data.content);
+      }
+
+      console.log('   ✅ Transcript complete, length:', transcript.length);
+      return sendJSON(res, { ok: true, transcript });
+
+    } catch (e) {
+      console.error('   ❌ Transcript error:', e.message);
+      return sendError(res, 'Transcription failed: ' + e.message, 500);
+    }
+  }
+
+  // AI Summarize — uses transcript text if available, otherwise processes audio
+  if (pathname === '/api/meeting/summarize' && method === 'POST') {
+    const body = await readBody(req);
+    const { filePath: audioPath, transcript: existingTranscript, config, accessToken } = body;
+
+    if (!accessToken) return sendError(res, 'accessToken required', 401);
+    if (!audioPath && !existingTranscript) return sendError(res, 'filePath or transcript required');
+
+    try {
+      const lang = config?.language || 'vi';
       const outLang = config?.outputLang || 'vi';
       const detail = config?.detailLevel || 'standard';
       const tone = config?.tone || 'neutral';
       const focusActions = config?.focusActions !== false;
 
-      const langName = { vi: 'Vietnamese', en: 'English', auto: 'Auto-detect' }[lang] || lang;
       const outLangName = outLang === 'vi' ? 'Vietnamese' : 'English';
 
-      const systemPrompt = `You are an expert meeting summarizer. Analyze the audio and produce structured JSON.
+      const systemPrompt = `You are an expert meeting summarizer. Analyze the meeting content and produce structured JSON.
 
 Output language: ${outLangName}
 Detail level: ${detail}
@@ -406,10 +729,10 @@ Tone: ${tone}
 
 Respond ONLY with valid JSON (no markdown, no code blocks):
 {
-  "transcript": "Full transcript of the meeting",
-  "summary": "Brief overview summary",
+  "transcript": "Full transcript (keep existing if provided)",
+  "summary": "Brief overview summary of the meeting",
   "actionItems": [
-    { "task": "Description", "assignee": "Person", "deadline": "When" }
+    { "task": "Description of the task", "assignee": "Person responsible", "deadline": "When it's due" }
   ],
   "assignments": [
     { "person": "Name", "role": "Role", "tasks": ["task1", "task2"] }
@@ -417,26 +740,43 @@ Respond ONLY with valid JSON (no markdown, no code blocks):
   "keyDecisions": ["decision 1", "decision 2"]
 }`;
 
-      const userMsg = `Transcribe and summarize this meeting. Language: ${langName}.${focusActions ? ' Focus on action items, assignments, and deadlines.' : ''}`;
+      let userContent;
 
-      // Build OpenAI-compatible chat request for ClickAI
+      if (existingTranscript) {
+        // Use transcript text — no need to send audio again
+        const userMsg = `Here is the meeting transcript. Summarize it and extract action items.\n\nTranscript:\n${existingTranscript}`;
+        userContent = [{ type: 'text', text: userMsg }];
+        console.log(`   🤖 Summarizing from transcript (${existingTranscript.length} chars)...`);
+      } else {
+        // Fallback: process audio directly
+        const relativePath = audioPath.replace(/^\/meeting\//, '');
+        const fullAudioPath = path.join(MEETING_DIR, relativePath);
+        if (!fs.existsSync(fullAudioPath)) return sendError(res, 'Audio file not found', 404);
+
+        const audioBuffer = fs.readFileSync(fullAudioPath);
+        const audioBase64 = audioBuffer.toString('base64');
+        const ext = path.extname(fullAudioPath).slice(1).toLowerCase();
+        const mimeMap = { webm: 'audio/webm', mp3: 'audio/mpeg', wav: 'audio/wav', m4a: 'audio/mp4', ogg: 'audio/ogg' };
+        const mimeType = mimeMap[ext] || 'audio/webm';
+
+        const langName = { vi: 'Vietnamese', en: 'English', auto: 'Auto-detect' }[lang] || lang;
+        const userMsg = `Transcribe and summarize this meeting. Language: ${langName}.${focusActions ? ' Focus on action items, assignments, and deadlines.' : ''}`;
+        userContent = [
+          { type: 'audio_url', audio_url: { url: `data:${mimeType};base64,${audioBase64}` } },
+          { type: 'text', text: userMsg }
+        ];
+        console.log(`   🤖 Summarizing audio (${(audioBuffer.length / 1024 / 1024).toFixed(1)}MB) via ClickAI...`);
+      }
+
       const payload = JSON.stringify({
         model: 'gemini-2.5-flash',
         messages: [
           { role: 'system', content: systemPrompt },
-          {
-            role: 'user',
-            content: [
-              { type: 'audio_url', audio_url: { url: `data:${mimeType};base64,${audioBase64}` } },
-              { type: 'text', text: userMsg }
-            ]
-          }
+          { role: 'user', content: userContent }
         ],
         temperature: 0.3,
         max_tokens: 8192
       });
-
-      console.log(`   🤖 Summarizing audio (${(audioBuffer.length / 1024 / 1024).toFixed(1)}MB) via ClickAI...`);
 
       const resp = await httpsRequest('https://clickai.io/conversation/api/chat/completions', {
         method: 'POST',
@@ -470,7 +810,7 @@ Respond ONLY with valid JSON (no markdown, no code blocks):
         parsed = JSON.parse(jsonStr);
       } catch {
         parsed = {
-          transcript: aiContent,
+          transcript: existingTranscript || aiContent,
           summary: '',
           actionItems: [],
           assignments: [],
@@ -478,10 +818,15 @@ Respond ONLY with valid JSON (no markdown, no code blocks):
         };
       }
 
+      // If we had existing transcript, preserve it
+      if (existingTranscript && !parsed.transcript) {
+        parsed.transcript = existingTranscript;
+      }
+
       console.log('   ✅ Summarization complete');
       return sendJSON(res, {
         ok: true,
-        transcript: parsed.transcript || '',
+        transcript: parsed.transcript || existingTranscript || '',
         summary: parsed.summary || '',
         actionItems: parsed.actionItems || [],
         assignments: parsed.assignments || [],
@@ -582,7 +927,20 @@ async function start() {
             workspace: agent.workspace, agent_dir: agent.agentDir,
             primary_model: agent.primaryModel,
           });
-          if (agent.providers?.length > 0) llmQueries.replaceAll(agent.id, agent.providers);
+          // Merge: only add filesystem providers if not already in DB with valid key
+          if (agent.providers?.length > 0) {
+            const existingDb = llmQueries.getByAgent(agent.id);
+            const existingMap = {};
+            for (const ep of existingDb) {
+              if (ep.api_key && ep.api_key.length > 3) existingMap[ep.provider] = true;
+            }
+            // Only replace if DB has no providers at all
+            if (existingDb.length === 0) {
+              llmQueries.replaceAll(agent.id, agent.providers);
+            }
+            // Otherwise, only add NEW providers not already in DB with valid keys
+            // Don't overwrite user-configured keys with empty filesystem keys
+          }
         }
         console.log(`   📂 Synced ${fsAgents.length} agents from filesystem\n`);
       } catch (e) {

@@ -6,6 +6,13 @@
   <title>ClickAI — Multi-Agent Gateway Admin</title>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="admin.css" />
+  <script>
+    // Apply saved theme before render to prevent flash
+    (function() {
+      const saved = localStorage.getItem('admin-theme') || 'dark';
+      document.documentElement.setAttribute('data-theme', saved);
+    })();
+  </script>
 </head>
 <body>
   <!-- ═══ Background Effects ═══ -->
@@ -42,7 +49,7 @@
           <span class="nav-icon">⚙️</span> Config
         </a>
         <div style="border-top:1px solid var(--surface-border);margin:8px 0"></div>
-        <a href="#" id="openclawLink" onclick="openOpenClawUI()" class="nav-item" style="color:var(--accent)">
+        <a href="#" class="nav-item" data-page="openclaw" onclick="switchPage('openclaw')" style="color:var(--accent)">
           <span class="nav-icon">🌐</span> OpenClaw UI
         </a>
       </nav>
@@ -71,6 +78,7 @@
             <span id="statusText">Checking...</span>
           </span>
           <button class="btn-action" onclick="syncFromOpenClaw()">🔄 Sync</button>
+          <button class="theme-toggle" id="themeToggle" onclick="toggleTheme()" title="Toggle light/dark mode">🌙</button>
         </div>
       </header>
 
@@ -100,57 +108,80 @@
         </div>
         <h3 class="section-title">Recent Agents</h3>
         <div class="agent-cards" id="dashboardAgents"></div>
+
+        <!-- User Skill Requests -->
+        <h3 class="section-title" style="margin-top:32px">📩 User Requests</h3>
+        <div id="dashboardRequests" style="margin-top:12px">
+          <p style="color:#64748b;font-size:13px">Loading...</p>
+        </div>
       </section>
 
       <!-- ═══ Page: Agents ═══ -->
       <section class="page" id="page-agents">
-        <div class="page-header">
-          <h3 class="section-title">All Agents</h3>
-          <button class="btn-primary" onclick="syncFromOpenClaw()">🔄 Sync from OpenClaw</button>
+
+        <!-- Agent List View (shown by default) -->
+        <div id="agentsListView">
+          <div class="page-header">
+            <div style="display:flex;align-items:center;gap:16px;flex:1">
+              <h3 class="section-title" style="margin:0;white-space:nowrap">All Agents</h3>
+              <div class="search-wrap">
+                <span class="search-icon">🔍</span>
+                <input type="text" id="agentSearchInput" class="search-input" placeholder="Search by email, name, or agent ID..." oninput="filterAgents(this.value)" />
+              </div>
+            </div>
+            <button class="btn-primary" onclick="syncFromOpenClaw()">🔄 Sync from OpenClaw</button>
+          </div>
+          <div class="agent-cards" id="agentsList"></div>
         </div>
-        <div class="agent-cards" id="agentsList"></div>
 
-        <!-- Agent Detail Panel -->
-        <div class="agent-detail" id="agentDetail" style="display:none">
-          <div class="detail-header">
-            <h3 id="detailAgentName"></h3>
-            <button class="btn-close" onclick="closeDetail()">✕</button>
+        <!-- Agent Detail View (hidden until agent selected) -->
+        <div id="agentDetailView" style="display:none">
+          <div class="detail-back-row">
+            <button class="btn-back" onclick="backToAgentsList()">← Back to All Agents</button>
           </div>
 
-          <div class="detail-tabs">
-            <button class="tab-btn active" onclick="switchTab('overview')">📊 Overview</button>
-            <button class="tab-btn" onclick="switchTab('llm')">🔑 LLM Providers</button>
-            <button class="tab-btn" onclick="switchTab('permissions')">🔒 Permissions</button>
-            <button class="tab-btn" onclick="switchTab('skills')">🛠 Skills</button>
-            <button class="tab-btn" onclick="switchTab('crons')">⏰ Cron Jobs</button>
-          </div>
+          <div class="agent-detail" id="agentDetail">
+            <div class="detail-header">
+              <h3 id="detailAgentName"></h3>
+            </div>
 
-          <!-- Tab: Overview -->
-          <div class="tab-panel active" id="tab-overview">
-            <div class="detail-grid" id="overviewGrid"></div>
-          </div>
+            <div class="detail-tabs">
+              <button class="tab-btn active" onclick="switchTab('overview', event)">📊 Overview</button>
+              <button class="tab-btn" onclick="switchTab('llm', event)">🔑 LLM Providers</button>
+              <button class="tab-btn" onclick="switchTab('permissions', event)">🔒 Permissions</button>
+              <button class="tab-btn" onclick="switchTab('skills', event)">🛠 Skills</button>
+              <button class="tab-btn" onclick="switchTab('crons', event)">⏰ Cron Jobs</button>
+            </div>
 
-          <!-- Tab: LLM Providers -->
-          <div class="tab-panel" id="tab-llm">
-            <div class="llm-providers" id="llmProvidersList"></div>
-            <button class="btn-primary" onclick="addLlmProvider()" style="margin-top:12px">+ Add Provider</button>
-            <button class="btn-save" onclick="saveLlmProviders()">💾 Save & Sync to OpenClaw</button>
-          </div>
+            <!-- Tab: Overview -->
+            <div class="tab-panel active" id="tab-overview">
+              <div class="detail-grid" id="overviewGrid"></div>
+              <h3 class="section-title" style="margin-top:20px">📝 Session History</h3>
+              <div id="agentSessionsList" class="sessions-list"></div>
+            </div>
 
-          <!-- Tab: Permissions -->
-          <div class="tab-panel" id="tab-permissions">
-            <div id="permissionsForm"></div>
-            <button class="btn-save" onclick="savePermissions()">💾 Save Permissions</button>
-          </div>
+            <!-- Tab: LLM Providers -->
+            <div class="tab-panel" id="tab-llm">
+              <div class="llm-providers" id="llmProvidersList"></div>
+              <button class="btn-primary" onclick="addLlmProvider()" style="margin-top:12px">+ Add Provider</button>
+              <button class="btn-save" onclick="saveLlmProviders()">💾 Save & Sync to OpenClaw</button>
+            </div>
 
-          <!-- Tab: Skills -->
-          <div class="tab-panel" id="tab-skills">
-            <div id="skillsList"></div>
-          </div>
+            <!-- Tab: Permissions -->
+            <div class="tab-panel" id="tab-permissions">
+              <div id="permissionsForm"></div>
+              <button class="btn-save" onclick="savePermissions()">💾 Save Permissions</button>
+            </div>
 
-          <!-- Tab: Cron Jobs -->
-          <div class="tab-panel" id="tab-crons">
-            <div id="cronsList"></div>
+            <!-- Tab: Skills -->
+            <div class="tab-panel" id="tab-skills">
+              <div id="skillsList"></div>
+            </div>
+
+            <!-- Tab: Cron Jobs -->
+            <div class="tab-panel" id="tab-crons">
+              <div id="cronsList"></div>
+            </div>
           </div>
         </div>
       </section>
@@ -163,7 +194,7 @@
 
       <!-- ═══ Page: Sessions ═══ -->
       <section class="page" id="page-sessions">
-        <h3 class="section-title">Active Sessions</h3>
+        <h3 class="section-title">Recent Sessions</h3>
         <div id="sessionsList" class="sessions-list"></div>
       </section>
 
@@ -177,6 +208,20 @@
         <div class="config-section">
           <h4>OpenClaw Config (openclaw.json)</h4>
           <textarea class="config-editor" id="configEditor" rows="20" readonly></textarea>
+        </div>
+      </section>
+
+      <!-- ═══ Page: OpenClaw WebChat (iframe) ═══ -->
+      <section class="page" id="page-openclaw">
+        <div class="openclaw-iframe-wrap">
+          <div class="openclaw-toolbar">
+            <span style="font-size:13px;font-weight:600;display:flex;align-items:center;gap:6px">🌐 OpenClaw WebChat</span>
+            <div style="display:flex;gap:8px">
+              <button class="btn-action" onclick="reloadOpenClawFrame()" title="Reload">🔄</button>
+              <button class="btn-action" onclick="openOpenClawExternal()" title="Open in new tab">↗️</button>
+            </div>
+          </div>
+          <iframe id="openclawFrame" class="openclaw-iframe" src="about:blank" allow="clipboard-write; clipboard-read"></iframe>
         </div>
       </section>
 
