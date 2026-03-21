@@ -205,6 +205,88 @@ async function agentsList() {
   catch (e) { console.warn('[WS] agents.list failed:', e.message); return []; }
 }
 
+// Chat proxy: send message to a specific agent's session
+async function chatSend(agentId, message, sessionKey = 'main') {
+  // Build session key: agent:{agentId}:{sessionKey}
+  const fullSessionKey = agentId ? `agent:${agentId}:${sessionKey}` : sessionKey;
+  const idempotencyKey = 'admin-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6);
+  try {
+    const r = await request('chat.send', {
+      sessionKey: fullSessionKey,
+      message,
+      deliver: false,
+      idempotencyKey
+    });
+    console.log('[WS] ✅ chat.send to', fullSessionKey);
+    return r;
+  } catch (e) {
+    console.warn('[WS] chat.send failed:', e.message);
+    throw e;
+  }
+}
+
+// Config get: read current openclaw config
+async function configGet() {
+  try { return await request('config.get', {}); }
+  catch (e) { console.warn('[WS] config.get failed:', e.message); return null; }
+}
+
+// Config patch: push agent model change to gateway via config.patch
+// Uses filesystem config (valid JSON) instead of gateway raw (JS object format)
+async function configPatchModel(agentId, model) {
+  try {
+    // Get baseHash from gateway (don't parse raw — it's JS object format, not JSON)
+    let baseHash;
+    try {
+      const configRes = await request('config.get', {});
+      baseHash = configRes?.hash || configRes?.baseHash;
+    } catch {}
+
+    // Read the REAL config from filesystem (valid JSON)
+    const fs = require('fs');
+    const path = require('path');
+    const configPath = path.join(require('os').homedir(), '.openclaw', 'openclaw.json');
+    const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+
+    if (!config?.agents?.list) {
+      console.warn('[WS] No agents.list in filesystem config');
+      return false;
+    }
+
+    // Update the target agent's model
+    const updatedList = config.agents.list.map(a => {
+      if (a.id === agentId) return { ...a, model };
+      return a;
+    });
+
+    // Ensure model is in configured models list
+    const models = config.agents?.defaults?.models || {};
+    if (!models[model]) models[model] = {};
+
+    // Build minimal patch — only agents section
+    const patch = {
+      agents: {
+        list: updatedList,
+        defaults: { ...config.agents.defaults, models }
+      }
+    };
+    const patchParams = { raw: JSON.stringify(patch) };
+    if (baseHash) patchParams.baseHash = baseHash;
+
+    await request('config.patch', patchParams);
+    console.log('[WS] ✅ config.patch model:', model, 'for agent:', agentId);
+    return true;
+  } catch (e) {
+    // Gateway may restart after config.patch — that's expected
+    if (e.message?.includes('closed') || e.message?.includes('disconnect')) {
+      console.log('[WS] Gateway restarting after config.patch (expected)');
+      return true;
+    }
+    console.warn('[WS] config.patch failed:', e.message);
+    return false;
+  }
+}
+
 function isConnected() {
   return !!(ws && ws.readyState === WebSocket.OPEN && _authenticated);
 }
@@ -215,4 +297,4 @@ function disconnect() {
   if (ws) ws.close();
 }
 
-module.exports = { connect, request, secretsReload, modelsList, sessionsList, agentsList, isConnected, disconnect };
+module.exports = { connect, request, secretsReload, modelsList, sessionsList, agentsList, chatSend, configGet, configPatchModel, isConnected, disconnect };
