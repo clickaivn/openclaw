@@ -61,6 +61,19 @@ function verifyToken(req) {
   return null;
 }
 
+// Verify that X-User-Email header matches the agent's owner in DB
+// Returns { ok, email } or { ok: false, error }
+function verifyAgentOwner(req, agentId) {
+  const email = req.headers['x-user-email'] || '';
+  if (!email) return { ok: false, error: 'X-User-Email header required' };
+  const agent = agentQueries.getById(agentId);
+  if (!agent) return { ok: true, email }; // New agent — allow creation
+  if (agent.user_email && agent.user_email !== email) {
+    return { ok: false, error: 'Email mismatch: agent belongs to ' + agent.user_email };
+  }
+  return { ok: true, email };
+}
+
 async function readRawBody(req, limit = 50 * 1024 * 1024) {
   return new Promise((resolve, reject) => {
     const chunks = [];
@@ -236,6 +249,21 @@ async function handleRequest(req, res) {
     }
   }
 
+  // ── Provider Library (canonical list of providers + models) ──
+  if (pathname === '/api/providers' && method === 'GET') {
+    const PROVIDER_CATALOG = [
+      { name: 'OpenAI',    icon: 'openai',    models: ['gpt-5.4','gpt-5.4-pro','gpt-5.4-mini','gpt-5.4-nano','gpt-5.3','gpt-5.2','gpt-5.1','o4-mini','o3','gpt-4.1','gpt-4.1-mini','gpt-4o'] },
+      { name: 'Anthropic',  icon: 'anthropic',  models: ['claude-opus-4-6','claude-sonnet-4-6','claude-sonnet-4-20250514','claude-opus-4-20250514','claude-3-5-haiku-latest'] },
+      { name: 'Google',     icon: 'gemini',     models: ['gemini-3.1-pro-preview','gemini-3-flash-preview','gemini-3.1-flash-lite-preview','gemini-2.5-flash','gemini-2.5-pro','gemini-2.0-flash'] },
+      { name: 'xAI',        icon: 'xai',        models: ['grok-4','grok-4.20-reasoning','grok-4.20-non-reasoning','grok-4-1-fast-reasoning','grok-3','grok-3-mini'] },
+      { name: 'DeepSeek',   icon: 'deepseek',   models: ['deepseek-chat','deepseek-reasoner'] },
+      { name: 'Qwen',       icon: 'qwen',       models: ['qwen3.5-plus','qwen3-max-2026-01-23','qwen3-coder-next','qwen3-coder-plus'] },
+      { name: 'Mistral',    icon: 'mistral',    models: ['mistral-small-latest','mistral-large-latest','codestral-latest','pixtral-large-latest','mistral-medium-latest'] },
+      { name: 'LLaMA',      icon: 'llama',      models: ['llama-4-maverick-17b-128e','llama-4-scout-17b-16e','llama-3.3-70b','llama-3.1-405b','llama-3.1-70b'] },
+    ];
+    return sendJSON(res, { providers: PROVIDER_CATALOG });
+  }
+
   // ── Agent LLM Providers ──
   const llmMatch = pathname.match(/^\/api\/agents\/([^/]+)\/llm$/);
   if (llmMatch) {
@@ -247,6 +275,12 @@ async function handleRequest(req, res) {
 
     if (method === 'PUT') {
       const body = await readBody(req);
+      // Verify caller owns this agent (skip if no header — backward compat)
+      const callerEmail = req.headers['x-user-email'];
+      if (callerEmail) {
+        const verify = verifyAgentOwner(req, agentId);
+        if (!verify.ok) return sendError(res, verify.error, 403);
+      }
       const providers = body.providers || body;
       if (!Array.isArray(providers)) return sendError(res, 'providers must be an array');
 
@@ -357,10 +391,70 @@ async function handleRequest(req, res) {
     return;
   }
 
+  // ── Per-Agent Settings Sync (PULL from Admin → Extension) ──
+  const syncMatch = pathname.match(/^\/api\/agents\/([^/]+)\/settings-sync$/);
+  if (syncMatch && method === 'GET') {
+    const agentId = decodeURIComponent(syncMatch[1]);
+    const email = url.searchParams.get('email') || req.headers['x-user-email'] || '';
+    if (!email) return sendError(res, 'email query param or X-User-Email header required', 400);
+
+    // Verify email matches agent owner
+    const agent = agentQueries.getById(agentId);
+    if (agent && agent.user_email && agent.user_email !== email) {
+      return sendError(res, 'Email mismatch: agent belongs to different user', 403);
+    }
+
+    // Gather all settings for this agent
+    // Map lowercase provider names → canonical Extension display names
+    const CANONICAL_NAMES = {
+      openai: 'OpenAI', anthropic: 'Anthropic', google: 'Google',
+      gemini: 'Google', deepseek: 'DeepSeek', xai: 'xAI',
+      mistral: 'Mistral', llama: 'LLaMA', qwen: 'Qwen',
+      modelstudio: 'Qwen',
+    };
+    const providers = llmQueries.getByAgent(agentId).map(p => ({
+      name: CANONICAL_NAMES[(p.provider || '').toLowerCase()] || (p.provider || '').charAt(0).toUpperCase() + (p.provider || '').slice(1),
+      provider: p.provider,
+      apiKey: p.api_key || '',
+      model: p.model || '',
+      baseUrl: p.base_url || '',
+      active: !!p.active,
+    }));
+
+    const permissions = permQueries.getByAgent(agentId) || {
+      browser_control: 1, microphone: 1, notifications: 1,
+      clipboard: 1, file_access: 1, tab_management: 1
+    };
+
+    let credentials = {};
+    const credFile = path.join(__dirname, 'data', 'credentials', agentId + '.json');
+    try { credentials = JSON.parse(fs.readFileSync(credFile, 'utf8')); } catch {}
+
+    const primaryModel = agent?.primary_model || '';
+
+    console.log('[Admin] Settings-sync for agent:', agentId, '| email:', email,
+      '| providers:', providers.length, '| model:', primaryModel);
+
+    return sendJSON(res, {
+      ok: true,
+      agentId,
+      providers,
+      permissions,
+      credentials,
+      primaryModel,
+    });
+  }
+
   // ── Per-Agent Credentials (from Extension) ──
   const credMatch = pathname.match(/^\/api\/agents\/([^/]+)\/credentials$/);
   if (credMatch && method === 'POST') {
     const agentId = decodeURIComponent(credMatch[1]);
+    // Verify caller owns this agent
+    const callerEmail = req.headers['x-user-email'];
+    if (callerEmail) {
+      const verify = verifyAgentOwner(req, agentId);
+      if (!verify.ok) return sendError(res, verify.error, 403);
+    }
     const body = await readBody(req);
     const credFile = path.join(__dirname, 'data', 'credentials', agentId + '.json');
     fs.mkdirSync(path.dirname(credFile), { recursive: true });
@@ -387,6 +481,12 @@ async function handleRequest(req, res) {
       return sendJSON(res, saved || defaults);
     }
     if (method === 'PUT') {
+      // Verify caller owns this agent
+      const callerEmail = req.headers['x-user-email'];
+      if (callerEmail) {
+        const verify = verifyAgentOwner(req, agentId);
+        if (!verify.ok) return sendError(res, verify.error, 403);
+      }
       const body = await readBody(req);
       permQueries.upsert(agentId, body);
       return sendJSON(res, { ok: true });

@@ -55,6 +55,7 @@ services:
       OPENCLAW_WS_URL: ws://openclaw-gateway:18789
       OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN:-}
       OPENCLAW_DATA_DIR: /data/openclaw
+      OPENCLAW_MASTER_KEY: ${OPENCLAW_MASTER_KEY:-}
     volumes:
       - ${OPENCLAW_CONFIG_DIR}:/data/openclaw
       - admin-data:/app/data
