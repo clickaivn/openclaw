@@ -4,6 +4,7 @@
  */
 const fs = require('fs');
 const path = require('path');
+const { encryptAuthProfiles, decryptAuthProfiles } = require('./crypto-keys');
 
 // OpenClaw data directory (shared Docker volume or local path)
 const OPENCLAW_DIR = process.env.OPENCLAW_DATA_DIR
@@ -95,17 +96,21 @@ function listAgentsFromFilesystem() {
   });
 }
 
-// ═══ Read auth-profiles.json for an agent ═══
+// ═══ Read auth-profiles.json for an agent (with decryption) ═══
 function readAuthProfiles(agentId) {
   const filePath = path.join(getAgentsDir(), agentId, 'agent', 'auth-profiles.json');
   try {
-    return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    const raw = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    return decryptAuthProfiles(raw);
   } catch {
     return null;
   }
 }
 
-// ═══ Write auth-profiles.json for an agent (atomic) ═══
+// ═══ Write auth-profiles.json for an agent (atomic, 0600) ═══
+// NOTE: Encryption disabled — OpenClaw Gateway reads this file directly
+// and does not have crypto-keys.js to decrypt. Encryption must be
+// implemented at the gateway level (src/agents/pi-auth-json.ts) first.
 function writeAuthProfiles(agentId, authProfiles) {
   const agentDir = path.join(getAgentsDir(), agentId, 'agent');
   const filePath = path.join(agentDir, 'auth-profiles.json');
@@ -114,9 +119,12 @@ function writeAuthProfiles(agentId, authProfiles) {
   try {
     fs.mkdirSync(agentDir, { recursive: true });
 
-    // Write per-agent auth — ONLY user's own keys, no extras
-    fs.writeFileSync(tmpPath, JSON.stringify(authProfiles, null, 2) + '\n', 'utf8');
+    // Write plaintext (gateway cannot decrypt encrypted keys)
+    // Security: use 0600 permissions (owner-only read/write)
+    fs.writeFileSync(tmpPath, JSON.stringify(authProfiles, null, 2) + '\n', { encoding: 'utf8', mode: 0o600 });
     fs.renameSync(tmpPath, filePath);
+    try { fs.chmodSync(filePath, 0o600); } catch {}
+
     console.log('[Bridge] ✅ Wrote auth-profiles.json for:', agentId,
       '| providers:', Object.keys(authProfiles?.profiles || {}).join(', '));
 
