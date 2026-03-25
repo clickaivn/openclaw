@@ -1280,6 +1280,7 @@ export function listSessionsFromStore(params: {
   const label = typeof opts.label === "string" ? opts.label.trim() : "";
   const agentId = typeof opts.agentId === "string" ? normalizeAgentId(opts.agentId) : "";
   const search = typeof opts.search === "string" ? opts.search.trim().toLowerCase() : "";
+  const userPrefix = typeof opts.userPrefix === "string" ? opts.userPrefix.trim() : "";
   const activeMinutes =
     typeof opts.activeMinutes === "number" && Number.isFinite(opts.activeMinutes)
       ? Math.max(1, Math.floor(opts.activeMinutes))
@@ -1294,6 +1295,10 @@ export function listSessionsFromStore(params: {
         return false;
       }
       if (!includeUnknown && key === "unknown") {
+        return false;
+      }
+      // Multi-tenancy: filter by user prefix (e.g. "user:admin-clickai:")
+      if (userPrefix && !key.includes(userPrefix)) {
         return false;
       }
       if (agentId) {
