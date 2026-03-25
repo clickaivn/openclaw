@@ -128,9 +128,9 @@ function writeAuthProfiles(agentId, authProfiles) {
     console.log('[Bridge] ✅ Wrote auth-profiles.json for:', agentId,
       '| providers:', Object.keys(authProfiles?.profiles || {}).join(', '));
 
-    // Auto-sync global auth.profiles with provider mode declarations
-    // Gateway needs these to know WHICH providers exist (keys stay per-agent only)
-    syncGlobalAuthModes();
+    // NOTE: Do NOT call syncGlobalAuthModes() here — writing openclaw.json
+    // triggers gateway file watcher → full restart. auth-profiles.json is
+    // read per-agent directly; gateway needs only secrets.reload (via WS).
 
     return true;
   } catch (e) {
@@ -195,11 +195,23 @@ function providersToAuthProfiles(providers, existingProfiles = null) {
   const profiles = {};
   const usageStats = existingProfiles?.usageStats || {};
 
-  // Provider aliases: some providers need multiple auth-profile entries
-  // OpenClaw uses "gemini:" for Gemini models but Extension may send "google"
-  const PROVIDER_ALIASES = {
-    'google': ['google', 'gemini'],   // Google API key works for both
-    'gemini': ['google', 'gemini'],   // Gemini key = Google key
+  // Provider aliases: maps Extension provider name → OpenClaw auth-profile key(s)
+  // Format: { profileKey: { type, provider } }
+  // Google/Gemini: same API key works for BOTH profile names
+  const PROVIDER_PROFILE_MAP = {
+    'openai':      [{ key: 'openai:default',      provider: 'openai' }],
+    'anthropic':   [{ key: 'anthropic:default',    provider: 'anthropic' }],
+    'google':      [{ key: 'google:default',        provider: 'google' },
+                   { key: 'gemini:default',         provider: 'gemini' }],
+    'gemini':      [{ key: 'google:default',        provider: 'google' },
+                   { key: 'gemini:default',         provider: 'gemini' }],
+    'xai':         [{ key: 'xai:default',           provider: 'xai' }],
+    'mistral':     [{ key: 'mistral:default',       provider: 'mistral' }],
+    'deepseek':    [{ key: 'deepseek:default',      provider: 'deepseek' }],
+    'qwen':        [{ key: 'modelstudio:default',   provider: 'modelstudio' }],
+    'modelstudio': [{ key: 'modelstudio:default',   provider: 'modelstudio' }],
+    'moonshot':    [{ key: 'moonshot:default',      provider: 'moonshot' }],
+    'nvidia':      [{ key: 'nvidia:default',        provider: 'nvidia' }],
   };
 
   for (const p of providers) {
@@ -207,13 +219,13 @@ function providersToAuthProfiles(providers, existingProfiles = null) {
     const providerName = (p.provider || p.name || '').toLowerCase();
     const key = p.api_key || p.apiKey;
 
-    // Get all profile keys for this provider (including aliases)
-    const profileNames = PROVIDER_ALIASES[providerName] || [providerName];
-    for (const name of profileNames) {
-      const profileKey = name + ':default';
-      profiles[profileKey] = {
+    const profileEntries = PROVIDER_PROFILE_MAP[providerName];
+    if (!profileEntries) continue; // Unknown provider — skip
+
+    for (const entry of profileEntries) {
+      profiles[entry.key] = {
         type: 'api_key',
-        provider: name,
+        provider: entry.provider,
         key,
       };
     }
@@ -230,27 +242,44 @@ function providersToAuthProfiles(providers, existingProfiles = null) {
 function authProfilesToProviders(authProfiles) {
   if (!authProfiles?.profiles) return [];
 
-  // Default models for known providers (auth-profiles doesn't store model info)
-  const defaultModels = {
-    anthropic: 'claude-sonnet-4-20250514',
-    openai: 'gpt-4o',
-    google: 'gemini-2.5-pro-preview-06-05',
-    deepseek: 'deepseek-chat',
-    xai: 'grok-3',
-    mistral: 'mistral-large-latest',
+  // Latest default models for each provider (updated 2026-03)
+  const DEFAULT_MODELS = {
+    openai:      'gpt-4.1',
+    anthropic:   'claude-sonnet-4-20250514',
+    google:      'gemini-2.5-pro',
+    gemini:      'gemini-2.5-pro',
+    xai:         'grok-4',
+    mistral:     'mistral-large-latest',
+    deepseek:    'deepseek-chat',
+    modelstudio: 'qwen3-max',
+    moonshot:    'moonshot-v1-128k',
+    nvidia:      'meta/llama-3.3-70b-instruct',
   };
 
-  return Object.entries(authProfiles.profiles).map(([key, profile]) => {
-    const provider = profile.provider || key.split(':')[0];
-    return {
-      provider,
-      api_key: profile.key || '',
-      model: defaultModels[provider] || '',
-      base_url: '',
-      active: true,
-    };
-  });
+  // Dedupe by provider (google+gemini are the same key)
+  const seen = new Set();
+  return Object.entries(authProfiles.profiles)
+    .filter(([, profile]) => {
+      const provider = profile.provider || '';
+      if (seen.has(provider)) return false;
+      // Treat google+gemini as same provider for display
+      if (provider === 'gemini') { seen.add('google'); seen.add('gemini'); }
+      else seen.add(provider);
+      return true;
+    })
+    .map(([, profile]) => {
+      const provider = profile.provider || '';
+      const displayProvider = provider === 'gemini' ? 'google' : provider;
+      return {
+        provider: displayProvider,
+        api_key: profile.key || '',
+        model: DEFAULT_MODELS[provider] || DEFAULT_MODELS[displayProvider] || '',
+        base_url: '',
+        active: true,
+      };
+    });
 }
+
 
 // ═══ Update agent's primary model in openclaw.json ═══
 function updateAgentModel(agentId, model) {
