@@ -21,6 +21,8 @@ export const SessionsListParamsSchema = Type.Object(
     spawnedBy: Type.Optional(NonEmptyString),
     agentId: Type.Optional(NonEmptyString),
     search: Type.Optional(Type.String()),
+    /** Multi-tenancy: filter sessions by key prefix (e.g. `user:admin-clickai:`) */
+    userPrefix: Type.Optional(Type.String()),
   },
   { additionalProperties: false },
 );
