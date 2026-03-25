@@ -284,9 +284,11 @@ function getGlobalEnvVars() {
 
 // ═══ Auto-provision new agent: workspace + SOUL.md + openclaw.json entry ═══
 // Called when a new user syncs for the first time. Ensures:
-// 1. Workspace dir with SOUL.md (copied from default workspace)
+// 1. Workspace dir with SOUL.md (copied from templates/ or default workspace)
 // 2. Agent dir for auth-profiles.json
 // 3. Agent registered in openclaw.json with tools.profile: full
+// NOTE (Cloud): init-config may overwrite openclaw.json on pod restart.
+//   This function re-reads config fresh before writing to minimize stale data.
 function ensureAgentProvisioned(agentId, model) {
   const dataDir = getDataDir();
   const changes = [];
@@ -299,22 +301,31 @@ function ensureAgentProvisioned(agentId, model) {
       changes.push('agent-dir');
     }
 
-    // 2. Create per-agent workspace with SOUL.md from default
+    // 2. Create per-agent workspace with SOUL.md
     const workspaceDir = path.join(dataDir, 'workspace-' + agentId);
     const soulTarget = path.join(workspaceDir, 'SOUL.md');
-    const defaultSoul = path.join(dataDir, 'workspace', 'SOUL.md');
 
     if (!fs.existsSync(workspaceDir)) {
       fs.mkdirSync(workspaceDir, { recursive: true });
       changes.push('workspace');
     }
-    // Always keep SOUL.md in sync with default (in case instructions updated)
-    if (fs.existsSync(defaultSoul)) {
-      fs.copyFileSync(defaultSoul, soulTarget);
-      changes.push('soul');
+
+    // SOUL.md source priority:
+    // 1. templates/SOUL.md (bundled in Docker image — always up-to-date)
+    // 2. default workspace SOUL.md (may have user edits)
+    const templateSoul = path.join(__dirname, '..', 'templates', 'SOUL.md');
+    const defaultSoul = path.join(dataDir, 'workspace', 'SOUL.md');
+    const soulSource = fs.existsSync(templateSoul) ? templateSoul
+                     : fs.existsSync(defaultSoul) ? defaultSoul
+                     : null;
+
+    if (soulSource) {
+      fs.copyFileSync(soulSource, soulTarget);
+      changes.push('soul-from-' + (soulSource === templateSoul ? 'templates' : 'workspace'));
     }
 
     // 3. Register agent in openclaw.json if not present
+    // Re-read config fresh to minimize stale data after init-config overwrites
     const config = readOpenClawConfig();
     if (config?.agents?.list) {
       const existing = config.agents.list.find(a => a.id === agentId);

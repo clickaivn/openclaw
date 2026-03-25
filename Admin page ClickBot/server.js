@@ -198,6 +198,17 @@ async function handleRequest(req, res) {
     });
   }
 
+  // ── SOUL.md Template (for Extension to fetch when creating new agents) ──
+  if (pathname === '/api/soul-template' && method === 'GET') {
+    const templatePath = path.join(__dirname, 'templates', 'SOUL.md');
+    try {
+      const content = fs.readFileSync(templatePath, 'utf8');
+      return sendJSON(res, { ok: true, content });
+    } catch (e) {
+      return sendError(res, 'SOUL.md template not found', 404);
+    }
+  }
+
   // ── Auth ──
   if (pathname === '/api/auth/login' && method === 'POST') {
     const body = await readBody(req);
