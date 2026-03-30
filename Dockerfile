@@ -235,6 +235,11 @@ RUN --mount=type=cache,id=openclaw-bookworm-apt-cache,target=/var/cache/apt,shar
 RUN ln -sf /app/openclaw.mjs /usr/local/bin/openclaw \
  && chmod 755 /app/openclaw.mjs
 
+# Symlink control-ui so the runtime resolver finds it when entry is openclaw.mjs
+# (resolveControlUiDistIndexPath checks basename(dirname(argv1)) === 'dist',
+#  but openclaw.mjs lives at /app, not /app/dist)
+RUN ln -sf /app/dist/control-ui /app/control-ui
+
 ENV NODE_ENV=production
 
 # Security hardening: Run as non-root user
