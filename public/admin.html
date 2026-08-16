@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ClickAI — Multi-Agent Gateway Admin</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="admin.css" />
+  <script>
+    // Apply saved theme before render to prevent flash
+    (function() {
+      const saved = localStorage.getItem('admin-theme') || 'dark';
+      document.documentElement.setAttribute('data-theme', saved);
+    })();
+  </script>
+</head>
+<body>
+  <!-- ═══ Background Effects ═══ -->
+  <div class="bg-gradient"></div>
+  <div class="grid-bg"></div>
+
+  <!-- ═══ App Shell ═══ -->
+  <div id="app" class="app-shell">
+
+    <!-- ═══ Sidebar ═══ -->
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-logo">
+        <img src="/icon-transparent.png" alt="ClickAI" class="sidebar-logo-img" />
+        <div>
+          <div class="sidebar-brand">ClickAI</div>
+          <div class="sidebar-version">Gateway Admin v2.0</div>
+        </div>
+      </div>
+
+      <nav class="sidebar-nav">
+        <a href="#" class="nav-item active" data-page="dashboard" onclick="switchPage('dashboard')">
+          <span class="nav-icon">📊</span> Dashboard
+        </a>
+        <a href="#" class="nav-item" data-page="agents" onclick="switchPage('agents')">
+          <span class="nav-icon">🤖</span> Agents
+        </a>
+        <a href="#" class="nav-item" data-page="users" onclick="switchPage('users')">
+          <span class="nav-icon">👥</span> Users
+        </a>
+        <a href="#" class="nav-item" data-page="sessions" onclick="switchPage('sessions')">
+          <span class="nav-icon">💬</span> Sessions
+        </a>
+        <a href="#" class="nav-item" data-page="config" onclick="switchPage('config')">
+          <span class="nav-icon">⚙️</span> Config
+        </a>
+        <div style="border-top:1px solid var(--surface-border);margin:8px 0"></div>
+        <a href="#" class="nav-item" data-page="openclaw" onclick="switchPage('openclaw')" style="color:var(--accent)">
+          <span class="nav-icon">🌐</span> OpenClaw UI
+        </a>
+      </nav>
+
+      <div class="sidebar-footer">
+        <div class="sidebar-user" id="sidebarUser">
+          <div class="user-avatar">👤</div>
+          <div>
+            <div class="user-name" id="currentUserName">Admin</div>
+            <div class="user-email" id="currentUserEmail">admin@clickai.vn</div>
+          </div>
+        </div>
+        <button class="btn-logout" onclick="logout()">🚪 Logout</button>
+      </div>
+    </aside>
+
+    <!-- ═══ Main Content ═══ -->
+    <main class="main-content">
+
+      <!-- ═══ Top Bar ═══ -->
+      <header class="topbar">
+        <h2 class="topbar-title" id="pageTitle">Dashboard</h2>
+        <div class="topbar-actions">
+          <span class="gateway-status" id="gatewayStatus">
+            <span class="status-dot" id="statusDot"></span>
+            <span id="statusText">Checking...</span>
+          </span>
+          <button class="btn-action" onclick="syncFromOpenClaw()">🔄 Sync</button>
+          <button class="theme-toggle" id="themeToggle" onclick="toggleTheme()" title="Toggle light/dark mode">🌙</button>
+        </div>
+      </header>
+
+      <!-- ═══ Page: Dashboard ═══ -->
+      <section class="page active" id="page-dashboard">
+        <div class="stats-grid">
+          <div class="stat-card">
+            <div class="stat-icon">🤖</div>
+            <div class="stat-value" id="statAgents">0</div>
+            <div class="stat-label">Agents</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-icon">👥</div>
+            <div class="stat-value" id="statUsers">0</div>
+            <div class="stat-label">Users</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-icon">🧠</div>
+            <div class="stat-value" id="statModels">0</div>
+            <div class="stat-label">LLM Models</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-icon">💬</div>
+            <div class="stat-value" id="statSessions">0</div>
+            <div class="stat-label">Sessions</div>
+          </div>
+        </div>
+        <h3 class="section-title">Recent Agents</h3>
+        <div class="agent-cards" id="dashboardAgents"></div>
+
+        <!-- User Skill Requests -->
+        <h3 class="section-title" style="margin-top:32px">📩 User Requests</h3>
+        <div id="dashboardRequests" style="margin-top:12px">
+          <p style="color:#64748b;font-size:13px">Loading...</p>
+        </div>
+      </section>
+
+      <!-- ═══ Page: Agents ═══ -->
+      <section class="page" id="page-agents">
+
+        <!-- Agent List View (shown by default) -->
+        <div id="agentsListView">
+          <div class="page-header">
+            <div style="display:flex;align-items:center;gap:16px;flex:1">
+              <h3 class="section-title" style="margin:0;white-space:nowrap">All Agents</h3>
+              <div class="search-wrap">
+                <span class="search-icon">🔍</span>
+                <input type="text" id="agentSearchInput" class="search-input" placeholder="Search by email, name, or agent ID..." oninput="filterAgents(this.value)" />
+              </div>
+            </div>
+            <button class="btn-primary" onclick="syncFromOpenClaw()">🔄 Sync from OpenClaw</button>
+          </div>
+          <div class="agent-cards" id="agentsList"></div>
+        </div>
+
+        <!-- Agent Detail View (hidden until agent selected) -->
+        <div id="agentDetailView" style="display:none">
+          <div class="detail-back-row">
+            <button class="btn-back" onclick="backToAgentsList()">← Back to All Agents</button>
+          </div>
+
+          <div class="agent-detail" id="agentDetail">
+            <div class="detail-header">
+              <h3 id="detailAgentName"></h3>
+            </div>
+
+            <div class="detail-tabs">
+              <button class="tab-btn active" onclick="switchTab('overview', event)">📊 Overview</button>
+              <button class="tab-btn" onclick="switchTab('llm', event)">🔑 LLM Providers</button>
+              <button class="tab-btn" onclick="switchTab('permissions', event)">🔒 Permissions</button>
+              <button class="tab-btn" onclick="switchTab('skills', event)">🛠 Skills</button>
+              <button class="tab-btn" onclick="switchTab('crons', event)">⏰ Cron Jobs</button>
+            </div>
+
+            <!-- Tab: Overview -->
+            <div class="tab-panel active" id="tab-overview">
+              <div class="detail-grid" id="overviewGrid"></div>
+              <h3 class="section-title" style="margin-top:20px">📝 Session History</h3>
+              <div id="agentSessionsList" class="sessions-list"></div>
+            </div>
+
+            <!-- Tab: LLM Providers -->
+            <div class="tab-panel" id="tab-llm">
+              <div class="llm-providers" id="llmProvidersList"></div>
+              <button class="btn-primary" onclick="addLlmProvider()" style="margin-top:12px">+ Add Provider</button>
+              <button class="btn-save" onclick="saveLlmProviders()">💾 Save & Sync to OpenClaw</button>
+            </div>
+
+            <!-- Tab: Permissions -->
+            <div class="tab-panel" id="tab-permissions">
+              <div id="permissionsForm"></div>
+              <button class="btn-save" onclick="savePermissions()">💾 Save Permissions</button>
+            </div>
+
+            <!-- Tab: Skills -->
+            <div class="tab-panel" id="tab-skills">
+              <div id="skillsList"></div>
+            </div>
+
+            <!-- Tab: Cron Jobs -->
+            <div class="tab-panel" id="tab-crons">
+              <div id="cronsList"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ═══ Page: Users ═══ -->
+      <section class="page" id="page-users">
+        <h3 class="section-title">Registered Users</h3>
+        <div class="users-table" id="usersTable"></div>
+      </section>
+
+      <!-- ═══ Page: Sessions ═══ -->
+      <section class="page" id="page-sessions">
+        <h3 class="section-title">Recent Sessions</h3>
+        <div id="sessionsList" class="sessions-list"></div>
+      </section>
+
+      <!-- ═══ Page: Config ═══ -->
+      <section class="page" id="page-config">
+        <h3 class="section-title">Gateway Configuration</h3>
+        <div class="config-section">
+          <h4>Global Environment Variables</h4>
+          <div id="globalEnvVars"></div>
+        </div>
+        <div class="config-section">
+          <h4>OpenClaw Config (openclaw.json)</h4>
+          <textarea class="config-editor" id="configEditor" rows="20" readonly></textarea>
+        </div>
+      </section>
+
+      <!-- ═══ Page: OpenClaw WebChat (iframe) ═══ -->
+      <section class="page" id="page-openclaw">
+        <div class="openclaw-iframe-wrap">
+          <div class="openclaw-toolbar">
+            <span style="font-size:13px;font-weight:600;display:flex;align-items:center;gap:6px">🌐 OpenClaw WebChat</span>
+            <div style="display:flex;gap:8px">
+              <button class="btn-action" onclick="reloadOpenClawFrame()" title="Reload">🔄</button>
+              <button class="btn-action" onclick="openOpenClawExternal()" title="Open in new tab">↗️</button>
+            </div>
+          </div>
+          <iframe id="openclawFrame" class="openclaw-iframe" src="about:blank" allow="clipboard-write; clipboard-read"></iframe>
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <!-- ═══ Login Overlay ═══ -->
+  <div class="login-overlay" id="loginOverlay">
+    <div class="login-card">
+      <div class="logo-wrap">
+        <img src="/icon-transparent.png" alt="ClickAI" class="logo-img" />
+        <h1>Multi-Agent Gateway</h1>
+        <p class="subtitle">ADMIN CONSOLE</p>
+        <span class="version-tag">v2.0</span>
+      </div>
+      <form onsubmit="handleLogin(event)" autocomplete="off">
+        <div class="form-group">
+          <label>Email</label>
+          <div class="input-wrapper">
+            <input type="email" class="form-input" id="loginEmail" placeholder="demo@clickai.vn" autocomplete="off" />
+            <span class="icon">📧</span>
+          </div>
+        </div>
+        <div class="form-group">
+          <label>Password</label>
+          <div class="input-wrapper">
+            <input type="password" class="form-input" id="loginPassword" placeholder="********" autocomplete="new-password" />
+            <span class="icon">🔒</span>
+          </div>
+        </div>
+        <button type="submit" class="btn-login" id="btnLogin">
+          <span class="btn-text">🚀 Sign In</span>
+          <div class="spinner"></div>
+        </button>
+      </form>
+      <div id="loginStatus" class="status-msg"></div>
+      <p class="footer">Powered by <a href="https://clickai.vn">ClickAI</a> · Multi-Agent Platform</p>
+    </div>
+  </div>
+
+  <script src="admin.js"></script>
+</body>
+</html>

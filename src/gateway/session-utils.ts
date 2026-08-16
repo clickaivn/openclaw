@@ -2710,6 +2710,7 @@ function filterSessionEntries(params: {
   const label = normalizeOptionalString(opts.label) ?? "";
   const agentId = typeof opts.agentId === "string" ? normalizeAgentId(opts.agentId) : "";
   const search = normalizeLowercaseStringOrEmpty(opts.search);
+  const userPrefix = typeof opts.userPrefix === "string" ? opts.userPrefix.trim() : "";
   const activeMinutes =
     typeof opts.activeMinutes === "number" && Number.isFinite(opts.activeMinutes)
       ? Math.max(1, Math.floor(opts.activeMinutes))
@@ -2724,6 +2725,10 @@ function filterSessionEntries(params: {
         return false;
       }
       if (!includeUnknown && key === "unknown") {
+        return false;
+      }
+      // Multi-tenancy: filter by user prefix (e.g. "user:admin-clickai:")
+      if (userPrefix && !key.includes(userPrefix)) {
         return false;
       }
       if (agentId) {

@@ -188,6 +188,8 @@ export const SessionsListParamsSchema = Type.Object(
     search: Type.Optional(Type.String()),
     /** True lists archived sessions; false or omitted lists active sessions. */
     archived: Type.Optional(Type.Boolean()),
+    /** Multi-tenancy: filter sessions by key prefix (e.g. `user:admin-clickai:`) */
+    userPrefix: Type.Optional(Type.String()),
   },
   { additionalProperties: false },
 );

@@ -318,6 +318,11 @@ RUN --mount=type=cache,id=openclaw-bookworm-apt-cache,target=/var/cache/apt,shar
 RUN ln -sf /app/openclaw.mjs /usr/local/bin/openclaw \
  && chmod 755 /app/openclaw.mjs
 
+# Symlink control-ui so the runtime resolver finds it when entry is openclaw.mjs
+# (resolveControlUiDistIndexPath checks basename(dirname(argv1)) === 'dist',
+#  but openclaw.mjs lives at /app, not /app/dist)
+RUN ln -sf /app/dist/control-ui /app/control-ui
+
 # Pre-create default named-volume mount points so first-run Docker volumes copy
 # node ownership from the image instead of starting as root-owned directories.
 # NOTE: /home/node/.config must be created with node ownership first so that
